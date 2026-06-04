@@ -1,0 +1,225 @@
+# ROS2 EuRoC Vicon Room 运行参数，沿用原 ROS1 EuRoC 标定和算法配置。
+vio_node:
+  ros__parameters:
+    # 是否使用 `/clock` 仿真时间；播放 rosbag2 时应保持为 true。
+    use_sim_time: true
+    # 轨迹、参数记录等运行输出目录；launch 会用 `output_path` 参数覆盖该默认值。
+    output_path: "output"
+
+    # ROS2 传感器话题配置。
+    common:
+      # 左目原始图像话题。
+      image_left_topic: "/cam0/image_raw"
+      # 右目原始图像话题。
+      image_right_topic: "/cam1/image_raw"
+      # IMU 测量话题。
+      imu_topic: "/imu0"
+
+    # 滤波器状态和在线标定开关。
+    state_parameter:
+      # 是否使用 First-Estimate Jacobian，提高 EKF 一致性。
+      use_fej: true
+      # 是否在线优化相机到 IMU 的外参。
+      calib_cam_extrinsics: false
+      # 是否在线优化相机内参。
+      calib_cam_intrinsics: false
+      # 是否在线优化相机与 IMU 的时间偏移。
+      calib_cam_timeoffset: false
+      # 是否在线优化 IMU 内参。
+      calib_imu_intrinsics: false
+      # 是否在线优化陀螺仪重力敏感项。
+      calib_imu_g_sensitivity: false
+      # IMU 内参模型；EuRoC 标定使用 Kalibr 模型。
+      imu_intrinsics_model: "kalibr"
+      # 滑窗中保留的历史 clone 位姿数量。
+      max_clones: 11
+      # 滤波器状态中最多保留的 SLAM 地图点数量。
+      max_slam: 100
+      # 单次 SLAM 更新最多处理的地图点数量。
+      max_slam_in_update: 100
+      # 单次 MSCKF 更新最多处理的特征数量。
+      max_msckf_in_update: 100
+
+    # 视觉惯性初始化参数。
+    initializer_parameter:
+      # 初始化时累计 IMU/视觉信息的时间窗口，单位秒。
+      init_window_time: 2.0
+      # 静态初始化检测 IMU 激励的阈值。
+      init_imu_thresh: 1.5
+      # 判定平台运动的图像平均视差阈值，单位像素。
+      init_max_disparity: 10.0
+      # 初始化阶段跟踪的最大特征数。
+      init_max_features: 50
+      # 静态初始化不可用时是否允许动态初始化。
+      init_dyn_use: true
+      # 动态初始化 MLE 阶段是否同时优化标定参数。
+      init_dyn_mle_opt_calib: false
+      # 动态初始化 MLE 最大迭代次数。
+      init_dyn_mle_max_iter: 50
+      # 动态初始化 MLE 最大求解时间，单位秒。
+      init_dyn_mle_max_time: 0.05
+      # 动态初始化 MLE 使用的线程数。
+      init_dyn_mle_max_threads: 6
+      # 动态初始化窗口内用于建模的离散位姿数量。
+      init_dyn_num_pose: 6
+      # 触发动态初始化所需的最小 IMU 旋转角，单位度。
+      init_dyn_min_deg: 10.0
+      # 动态初始化姿态协方差膨胀系数。
+      init_dyn_inflation_ori: 10.0
+      # 动态初始化速度协方差膨胀系数。
+      init_dyn_inflation_vel: 100.0
+      # 动态初始化陀螺仪 bias 协方差膨胀系数。
+      init_dyn_inflation_bg: 10.0
+      # 动态初始化加速度计 bias 协方差膨胀系数。
+      init_dyn_inflation_ba: 100.0
+      # 动态初始化协方差恢复的最小倒条件数。
+      init_dyn_min_rec_cond: 1.0e-12
+      # 动态初始化的陀螺仪 bias 初值。
+      init_dyn_bias_g: [0.0, 0.0, 0.0]
+      # 动态初始化的加速度计 bias 初值。
+      init_dyn_bias_a: [0.0, 0.0, 0.0]
+      # 重力模长，单位 m/s^2。
+      gravity_mag: 9.81
+      # 初始化阶段是否将图像下采样到一半分辨率。
+      downsample_cameras: false
+
+    # IMU 噪声和内参标定参数。
+    imu_parameter:
+      # 加速度计白噪声密度，单位 m/s^2/sqrt(Hz)。
+      accelerometer_noise_density: 2.0000e-3
+      # 加速度计 bias 随机游走噪声密度。
+      accelerometer_random_walk: 3.0000e-3
+      # 陀螺仪白噪声密度，单位 rad/s/sqrt(Hz)。
+      gyroscope_noise_density: 1.6968e-04
+      # 陀螺仪 bias 随机游走噪声密度。
+      gyroscope_random_walk: 1.9393e-05
+      # 初始化阶段视觉重投影噪声，单位像素。
+      sigma_pix: 1.0
+      # 陀螺仪尺度/错轴矩阵，单位矩阵表示不校正。
+      Tw: [1.0, 0.0, 0.0,
+           0.0, 1.0, 0.0,
+           0.0, 0.0, 1.0]
+      # 加速度计尺度/错轴矩阵，单位矩阵表示不校正。
+      Ta: [1.0, 0.0, 0.0,
+           0.0, 1.0, 0.0,
+           0.0, 0.0, 1.0]
+      # 加速度计坐标系到 IMU 坐标系的旋转。
+      R_acc_imu: [1.0, 0.0, 0.0,
+                  0.0, 1.0, 0.0,
+                  0.0, 0.0, 1.0]
+      # 陀螺仪坐标系到 IMU 坐标系的旋转。
+      R_gyr_imu: [1.0, 0.0, 0.0,
+                  0.0, 1.0, 0.0,
+                  0.0, 0.0, 1.0]
+      # 陀螺仪重力敏感矩阵。
+      Tg: [0.0, 0.0, 0.0,
+           0.0, 0.0, 0.0,
+           0.0, 0.0, 0.0]
+
+    # EuRoC 双目标定参数。
+    camera_parameter:
+      # 左目相机时间戳相对 IMU 的时间偏移，单位秒。
+      timeshift_cam_imu_left: 0.0
+      # 右目相机时间戳相对 IMU 的时间偏移，单位秒。
+      timeshift_cam_imu_right: 0.0
+      # 左目畸变模型，radtan 为径向-切向模型。
+      distortion_model_left: "radtan"
+      # 右目畸变模型，radtan 为径向-切向模型。
+      distortion_model_right: "radtan"
+      # 左目内参 `[fx, fy, cx, cy]`。
+      intrinsics_left: [458.654, 457.296, 367.215, 248.375]
+      # 右目内参 `[fx, fy, cx, cy]`。
+      intrinsics_right: [457.587, 456.134, 379.999, 255.238]
+      # 左目 radtan 畸变参数 `[k1, k2, p1, p2]`。
+      distortion_coeffs_left: [-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05]
+      # 右目 radtan 畸变参数 `[k1, k2, p1, p2]`。
+      distortion_coeffs_right: [-0.28368365, 0.07451284, -0.00010473, -3.55590700e-05]
+      # 左目图像分辨率 `[width, height]`。
+      resolution_left: [752, 480]
+      # 右目图像分辨率 `[width, height]`。
+      resolution_right: [752, 480]
+      # 左目 IMU 到相机外参 `T_imu_cam`，矩阵按行展开。
+      T_imu_cam_left: [0.0148655429818, -0.999880929698, 0.00414029679422, -0.0216401454975,
+                       0.999557249008, 0.0149672133247, 0.025715529948, -0.064676986768,
+                       -0.0257744366974, 0.00375618835797, 0.999660727178, 0.00981073058949,
+                       0.0, 0.0, 0.0, 1.0]
+      # 右目 IMU 到相机外参 `T_imu_cam`，矩阵按行展开。
+      T_imu_cam_right: [0.0125552670891, -0.999755099723, 0.0182237714554, -0.0198435579556,
+                        0.999598781151, 0.0130119051815, 0.0251588363115, 0.0453689425024,
+                        -0.0253898008918, 0.0179005838253, 0.999517347078, 0.00786212447038,
+                        0.0, 0.0, 0.0, 1.0]
+
+    # 里程计前端、滤波更新和关键帧参数。
+    odometry_parameter:
+      # 是否使用图像 mask 过滤无效区域。
+      use_mask: false
+      # 是否在视觉更新中使用 Huber 鲁棒核，难序列建议开启。
+      use_huber: true
+      # 是否启用关键帧策略控制 clone 边缘化。
+      use_keyframe: true
+      # 初始化后延迟注册 SLAM 地图点的时间，单位秒。
+      dt_slam_delay: 1.0
+      # MSCKF 更新使用的像素噪声标准差。
+      up_msckf_sigma_px: 1.0
+      # MSCKF 卡方门限倍率；较大值可避免 EuRoC V1_03 过早拒绝有效约束。
+      up_msckf_chi2_multipler: 5.0
+      # SLAM 地图点更新使用的像素噪声标准差。
+      up_slam_sigma_px: 1.0
+      # SLAM 更新卡方门限倍率；与 Huber 配合提高难序列鲁棒性。
+      up_slam_chi2_multipler: 5.0
+      # 正常跟踪阶段是否将图像下采样到一半分辨率。
+      downsample_cameras: false
+      # 正常跟踪阶段期望维护的特征数量。
+      num_pts: 500
+      # FAST 角点检测阈值，越小越容易检测到弱纹理角点。
+      fast_threshold: 20
+      # KLT 光流跟踪 patch 宽度。
+      patch_size_x: 5
+      # KLT 光流跟踪 patch 高度。
+      patch_size_y: 5
+      # 特征点之间的最小像素间距。
+      min_px_dist: 10
+      # 图像预处理方式：`none`、`histogram` 或 `clahe`。
+      histogram_method: "histogram"
+      # 图像处理频率上限，单位 Hz。
+      track_frequency: 20.0
+
+    # 特征三角化和非线性优化参数。
+    feature_parameter:
+      # 是否对三角化特征执行 Gauss-Newton 精化。
+      refine_features: true
+      # 特征精化最大迭代次数。
+      max_runs: 5
+      # Levenberg-Marquardt 初始阻尼系数。
+      init_lamda: 1.0e-3
+      # Levenberg-Marquardt 最大阻尼系数。
+      max_lamda: 1.0e10
+      # 特征优化步长收敛阈值。
+      min_dx: 1.0e-6
+      # 特征优化代价下降收敛阈值。
+      min_dcost: 1.0e-6
+      # 阻尼系数调整倍率。
+      lam_mult: 10.0
+      # 可接受特征深度下限，单位米。
+      min_dist: 0.10
+      # 可接受特征深度上限，单位米。
+      max_dist: 60.0
+      # 可用于三角化的最大基线长度，单位米。
+      max_baseline: 40.0
+      # 三角化线性系统最大条件数，超过则认为几何退化。
+      max_cond_number: 10000.0
+      # 判定关键帧所需的视差阈值，单位像素。
+      keyframe_parallax: 20
+
+    # voxel 地图管理参数。
+    voxel_parameter:
+      # voxel 边长，单位米。
+      voxel_size: 0.3
+      # 是否使用 voxel 中所有地图点；false 时每个 voxel 只取代表点。
+      use_all_points: false
+      # 每个 voxel 最多保存的地图点数量。
+      max_num_points_in_voxel: 5
+      # 同一 voxel 内地图点之间的最小距离，单位米。
+      min_distance_points: 0.0
+      # 选择可见地图点时访问的相邻 voxel 半径。
+      nb_voxels_visited: 2

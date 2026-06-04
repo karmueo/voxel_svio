@@ -5,7 +5,6 @@
 #include <vector>
 
 // lib include
-#include <ros/ros.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <Eigen/Core>

@@ -1,32 +1,40 @@
+/**
+ * @file stereoVio.cpp
+ * @brief 实现 ROS2 版 Voxel-SVIO 双目视觉惯性里程计节点。
+ */
+
 #include "stereoVio.h"
 
-voxelStereoVio::voxelStereoVio() : it(nh)
+#include <functional>
+
+namespace
+{
+/**
+ * @brief 将 double 秒时间戳转换为 ROS2 时间消息。
+ * @param timestamp 秒级时间戳。
+ * @return ROS2 时间消息。
+ */
+builtin_interfaces::msg::Time stampFromSec(double timestamp)
+{
+    int64_t nanoseconds = static_cast<int64_t>(timestamp * 1e9);
+    builtin_interfaces::msg::Time stamp;
+    stamp.sec = static_cast<int32_t>(nanoseconds / 1000000000);
+    stamp.nanosec = static_cast<uint32_t>(nanoseconds % 1000000000);
+    return stamp;
+}
+}
+
+voxelStereoVio::voxelStereoVio(const rclcpp::NodeOptions &options) : rclcpp::Node("vio_node", options)
 {
     readParameters();
+
+    resetPoseOutputFile();
 
     initialValue();
 
     allocateMemory();
 
-    sub_imu = nh.subscribe<sensor_msgs::Imu>(imu_topic, 500, &voxelStereoVio::imuHandler, this);
-
-    auto sub_img_left = std::make_shared<message_filters::Subscriber<sensor_msgs::Image>>(nh, image_left_topic, 5);
-    auto sub_img_right = std::make_shared<message_filters::Subscriber<sensor_msgs::Image>>(nh, image_right_topic, 5);
-    auto sync = std::make_shared<message_filters::Synchronizer<SyncStereoImage>>(SyncStereoImage(10), *sub_img_left, *sub_img_right);
-    sync->registerCallback(boost::bind(&voxelStereoVio::stereoImageHandler, this, _1, _2, 0, 1));
-
-    sync_cam.push_back(sync);
-    sync_subs_cam.push_back(sub_img_left);
-    sync_subs_cam.push_back(sub_img_right);
-
-    // display
-    pub_feat_image = it.advertise("camera/stereo_feat_image", 5);
-    pub_odom = nh.advertise<nav_msgs::Odometry>("vio/odom", 5);
-    pub_path = nh.advertise<nav_msgs::Path>("vio/path", 5);
-    pub_points_history = nh.advertise<sensor_msgs::PointCloud2>("vio/history_map_points", 2);
-    pub_points_window = nh.advertise<sensor_msgs::PointCloud2>("vio/window_map_points", 2);
-    pub_voxels_history = nh.advertise<sensor_msgs::PointCloud2>("vio/history_voxels", 2);
-    pub_voxels_visit = nh.advertise<sensor_msgs::PointCloud2>("vio/visit_voxels", 2);
+    setupRosInterfaces();
 
     points_history.reset(new pcl::PointCloud<pcl::PointXYZRGB>());
     points_window.reset(new pcl::PointCloud<pcl::PointXYZRGB>());
@@ -37,6 +45,45 @@ voxelStereoVio::voxelStereoVio() : it(nh)
     // odometry_options.recordParameters();
 }
 
+/**
+ * @brief 清空本次运行的轨迹输出文件，避免历史 `pose.txt` 污染评估。
+ */
+void voxelStereoVio::resetPoseOutputFile()
+{
+    /** 本次运行的位姿轨迹输出文件流。 */
+    std::ofstream pose_file(std::string(output_path + "/pose.txt"), std::ios::trunc);
+    pose_file.close();
+}
+
+void voxelStereoVio::setupRosInterfaces()
+{
+    auto sensor_qos = rclcpp::SensorDataQoS();
+    sub_imu = this->create_subscription<sensor_msgs::msg::Imu>(
+        imu_topic, sensor_qos, std::bind(&voxelStereoVio::imuHandler, this, std::placeholders::_1));
+
+    auto sub_img_left = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>();
+    auto sub_img_right = std::make_shared<message_filters::Subscriber<sensor_msgs::msg::Image>>();
+    sub_img_left->subscribe(this, image_left_topic, rmw_qos_profile_sensor_data);
+    sub_img_right->subscribe(this, image_right_topic, rmw_qos_profile_sensor_data);
+
+    auto sync = std::make_shared<message_filters::Synchronizer<SyncStereoImage>>(SyncStereoImage(10), *sub_img_left, *sub_img_right);
+    sync->registerCallback(std::bind(&voxelStereoVio::stereoImageHandler, this, std::placeholders::_1, std::placeholders::_2, 0, 1));
+
+    sync_cam.push_back(sync);
+    sync_subs_cam.push_back(sub_img_left);
+    sync_subs_cam.push_back(sub_img_right);
+
+    pub_feat_image = this->create_publisher<sensor_msgs::msg::Image>("camera/stereo_feat_image", 5);
+    pub_odom = this->create_publisher<nav_msgs::msg::Odometry>("vio/odom", 5);
+    pub_path = this->create_publisher<nav_msgs::msg::Path>("vio/path", 5);
+    pub_points_history = this->create_publisher<sensor_msgs::msg::PointCloud2>("vio/history_map_points", 2);
+    pub_points_window = this->create_publisher<sensor_msgs::msg::PointCloud2>("vio/window_map_points", 2);
+    pub_voxels_history = this->create_publisher<sensor_msgs::msg::PointCloud2>("vio/history_voxels", 2);
+    pub_voxels_visit = this->create_publisher<sensor_msgs::msg::PointCloud2>("vio/visit_voxels", 2);
+
+    timer = this->create_wall_timer(std::chrono::milliseconds(5), std::bind(&voxelStereoVio::run, this));
+}
+
 void voxelStereoVio::readParameters()
 {	
     int para_int;
@@ -44,19 +91,19 @@ void voxelStereoVio::readParameters()
     bool para_bool;
     std::string str_temp;
 
-    nh.param<std::string>("common/image_left_topic", image_left_topic, "/cam0/image_raw");
-    nh.param<std::string>("common/image_right_topic", image_right_topic, "/cam1/image_raw");
-    nh.param<std::string>("common/imu_topic", imu_topic, "/imu0");
-    nh.param<std::string>("output_path", output_path, "");
+    image_left_topic = declareAndGetParameter<std::string>("common.image_left_topic", "/cam0/image_raw");
+    image_right_topic = declareAndGetParameter<std::string>("common.image_right_topic", "/cam1/image_raw");
+    imu_topic = declareAndGetParameter<std::string>("common.imu_topic", "/imu0");
+    output_path = declareAndGetParameter<std::string>("output_path", "");
 
-    nh.param<bool>("state_parameter/use_fej", para_bool, false); odometry_options.state_options.do_fej = para_bool;
-    nh.param<bool>("state_parameter/calib_cam_extrinsics", para_bool, false); odometry_options.state_options.do_calib_camera_pose = para_bool;
-    nh.param<bool>("state_parameter/calib_cam_intrinsics", para_bool, false); odometry_options.state_options.do_calib_camera_intrinsics = para_bool;
-    nh.param<bool>("state_parameter/calib_cam_timeoffset", para_bool, false); odometry_options.state_options.do_calib_camera_timeoffset = para_bool;
-    nh.param<bool>("state_parameter/calib_imu_intrinsics", para_bool, false); odometry_options.state_options.do_calib_imu_intrinsics = para_bool;
-    nh.param<bool>("state_parameter/calib_imu_g_sensitivity", para_bool, false); odometry_options.state_options.do_calib_imu_g_sensitivity = para_bool;
+    para_bool = declareAndGetParameter<bool>("state_parameter.use_fej", false); odometry_options.state_options.do_fej = para_bool;
+    para_bool = declareAndGetParameter<bool>("state_parameter.calib_cam_extrinsics", false); odometry_options.state_options.do_calib_camera_pose = para_bool;
+    para_bool = declareAndGetParameter<bool>("state_parameter.calib_cam_intrinsics", false); odometry_options.state_options.do_calib_camera_intrinsics = para_bool;
+    para_bool = declareAndGetParameter<bool>("state_parameter.calib_cam_timeoffset", false); odometry_options.state_options.do_calib_camera_timeoffset = para_bool;
+    para_bool = declareAndGetParameter<bool>("state_parameter.calib_imu_intrinsics", false); odometry_options.state_options.do_calib_imu_intrinsics = para_bool;
+    para_bool = declareAndGetParameter<bool>("state_parameter.calib_imu_g_sensitivity", false); odometry_options.state_options.do_calib_imu_g_sensitivity = para_bool;
 
-    nh.param<std::string>("state_parameter/imu_intrinsics_model", str_temp, "kalibr");
+    str_temp = declareAndGetParameter<std::string>("state_parameter.imu_intrinsics_model", "kalibr");
     if (str_temp == "kalibr" || str_temp == "calibrated") odometry_options.state_options.imu_model = ImuModel::KALIBR;
     else if (str_temp == "rpng") odometry_options.state_options.imu_model = ImuModel::RPNG;
     else {
@@ -70,54 +117,54 @@ void voxelStereoVio::readParameters()
         odometry_options.state_options.do_calib_imu_g_sensitivity = false;
     }
 
-    nh.param<int>("state_parameter/max_clones", para_int, 11); odometry_options.state_options.max_clone_size = para_int;
-    nh.param<int>("state_parameter/max_slam", para_int, 25); odometry_options.state_options.max_slam_features = para_int;
-    nh.param<int>("state_parameter/max_slam_in_update", para_int, 1000); odometry_options.state_options.max_slam_in_update = para_int;
-    nh.param<int>("state_parameter/max_msckf_in_update", para_int, 1000); odometry_options.state_options.max_msckf_in_update = para_int;
+    para_int = declareAndGetParameter<int>("state_parameter.max_clones", 11); odometry_options.state_options.max_clone_size = para_int;
+    para_int = declareAndGetParameter<int>("state_parameter.max_slam", 25); odometry_options.state_options.max_slam_features = para_int;
+    para_int = declareAndGetParameter<int>("state_parameter.max_slam_in_update", 1000); odometry_options.state_options.max_slam_in_update = para_int;
+    para_int = declareAndGetParameter<int>("state_parameter.max_msckf_in_update", 1000); odometry_options.state_options.max_msckf_in_update = para_int;
 
-    nh.param<double>("initializer_parameter/init_window_time", para_double, 1.0); odometry_options.init_options.init_window_time = para_double;
-    nh.param<double>("initializer_parameter/init_imu_thresh", para_double, 1.0); odometry_options.init_options.init_imu_thresh = para_double;
-    nh.param<double>("initializer_parameter/init_max_disparity", para_double, 1.0); odometry_options.init_options.init_max_disparity = para_double;
-    nh.param<int>("initializer_parameter/init_max_features", para_int, 50); odometry_options.init_options.init_max_features = para_int;
-    nh.param<bool>("initializer_parameter/init_dyn_use", para_bool, false); odometry_options.init_options.init_dyn_use = para_bool;
-    nh.param<bool>("initializer_parameter/init_dyn_mle_opt_calib", para_bool, false); odometry_options.init_options.init_dyn_mle_opt_calib = para_bool;
-    nh.param<int>("initializer_parameter/init_dyn_mle_max_iter", para_int, 20); odometry_options.init_options.init_dyn_mle_max_iter = para_int;
-    nh.param<int>("initializer_parameter/init_dyn_mle_max_threads", para_int, 20); odometry_options.init_options.init_dyn_mle_max_threads = para_int;
-    nh.param<double>("initializer_parameter/init_dyn_mle_max_time", para_double, 5.0); odometry_options.init_options.init_dyn_mle_max_time = para_double;
-    nh.param<int>("initializer_parameter/init_dyn_num_pose", para_int, 5); odometry_options.init_options.init_dyn_num_pose = para_int;
-    nh.param<double>("initializer_parameter/init_dyn_min_deg", para_double, 45.0); odometry_options.init_options.init_dyn_min_deg = para_double;
-    nh.param<double>("initializer_parameter/init_dyn_inflation_ori", para_double, 10.0); odometry_options.init_options.init_dyn_inflation_orientation = para_double;
-    nh.param<double>("initializer_parameter/init_dyn_inflation_vel", para_double, 10.0); odometry_options.init_options.init_dyn_inflation_velocity = para_double;
-    nh.param<double>("initializer_parameter/init_dyn_inflation_bg", para_double, 100.0); odometry_options.init_options.init_dyn_inflation_bias_gyro = para_double;
-    nh.param<double>("initializer_parameter/init_dyn_inflation_ba", para_double, 100.0); odometry_options.init_options.init_dyn_inflation_bias_accel = para_double;
-    nh.param<double>("initializer_parameter/init_dyn_min_rec_cond", para_double, 1e-15); odometry_options.init_options.init_dyn_min_rec_cond = para_double;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_window_time", 1.0); odometry_options.init_options.init_window_time = para_double;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_imu_thresh", 1.0); odometry_options.init_options.init_imu_thresh = para_double;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_max_disparity", 1.0); odometry_options.init_options.init_max_disparity = para_double;
+    para_int = declareAndGetParameter<int>("initializer_parameter.init_max_features", 50); odometry_options.init_options.init_max_features = para_int;
+    para_bool = declareAndGetParameter<bool>("initializer_parameter.init_dyn_use", false); odometry_options.init_options.init_dyn_use = para_bool;
+    para_bool = declareAndGetParameter<bool>("initializer_parameter.init_dyn_mle_opt_calib", false); odometry_options.init_options.init_dyn_mle_opt_calib = para_bool;
+    para_int = declareAndGetParameter<int>("initializer_parameter.init_dyn_mle_max_iter", 20); odometry_options.init_options.init_dyn_mle_max_iter = para_int;
+    para_int = declareAndGetParameter<int>("initializer_parameter.init_dyn_mle_max_threads", 20); odometry_options.init_options.init_dyn_mle_max_threads = para_int;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_dyn_mle_max_time", 5.0); odometry_options.init_options.init_dyn_mle_max_time = para_double;
+    para_int = declareAndGetParameter<int>("initializer_parameter.init_dyn_num_pose", 5); odometry_options.init_options.init_dyn_num_pose = para_int;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_dyn_min_deg", 45.0); odometry_options.init_options.init_dyn_min_deg = para_double;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_dyn_inflation_ori", 10.0); odometry_options.init_options.init_dyn_inflation_orientation = para_double;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_dyn_inflation_vel", 10.0); odometry_options.init_options.init_dyn_inflation_velocity = para_double;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_dyn_inflation_bg", 100.0); odometry_options.init_options.init_dyn_inflation_bias_gyro = para_double;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_dyn_inflation_ba", 100.0); odometry_options.init_options.init_dyn_inflation_bias_accel = para_double;
+    para_double = declareAndGetParameter<double>("initializer_parameter.init_dyn_min_rec_cond", 1e-15); odometry_options.init_options.init_dyn_min_rec_cond = para_double;
 
     std::vector<double> v_bias_acc, v_bias_gyr;
-    nh.param<std::vector<double>>("initializer_parameter/init_dyn_bias_g", v_bias_gyr, std::vector<double>());
-    nh.param<std::vector<double>>("initializer_parameter/init_dyn_bias_a", v_bias_acc, std::vector<double>());
+    v_bias_gyr = declareAndGetParameter<std::vector<double>>("initializer_parameter.init_dyn_bias_g", std::vector<double>{0.0, 0.0, 0.0});
+    v_bias_acc = declareAndGetParameter<std::vector<double>>("initializer_parameter.init_dyn_bias_a", std::vector<double>{0.0, 0.0, 0.0});
     odometry_options.init_options.init_dyn_bias_g << v_bias_gyr.at(0), v_bias_gyr.at(1), v_bias_gyr.at(2);
     odometry_options.init_options.init_dyn_bias_a << v_bias_acc.at(0), v_bias_acc.at(1), v_bias_acc.at(2);
 
-    nh.param<double>("initializer_parameter/gravity_mag", para_double, 9.81); odometry_options.init_options.gravity_mag = para_double;
-    nh.param<bool>("initializer_parameter/downsample_cameras", para_bool, false); odometry_options.init_options.downsample_cameras = para_bool;
+    para_double = declareAndGetParameter<double>("initializer_parameter.gravity_mag", 9.81); odometry_options.init_options.gravity_mag = para_double;
+    para_bool = declareAndGetParameter<bool>("initializer_parameter.downsample_cameras", false); odometry_options.init_options.downsample_cameras = para_bool;
  
     double calib_camimu_dt_left, calib_camimu_dt_right;
-    nh.param<double>("camera_parameter/timeshift_cam_imu_left", calib_camimu_dt_left, 0.0);
-    nh.param<double>("camera_parameter/timeshift_cam_imu_right", calib_camimu_dt_right, 0.0);
+    calib_camimu_dt_left = declareAndGetParameter<double>("camera_parameter.timeshift_cam_imu_left", 0.0);
+    calib_camimu_dt_right = declareAndGetParameter<double>("camera_parameter.timeshift_cam_imu_right", 0.0);
     odometry_options.calib_camimu_dt = calib_camimu_dt_left;
 
     std::string dist_model_left, dist_model_right;
-    nh.param<std::string>("camera_parameter/distortion_model_left", dist_model_left, "radtan");
-    nh.param<std::string>("camera_parameter/distortion_model_right", dist_model_right, "radtan");
+    dist_model_left = declareAndGetParameter<std::string>("camera_parameter.distortion_model_left", "radtan");
+    dist_model_right = declareAndGetParameter<std::string>("camera_parameter.distortion_model_right", "radtan");
 
     std::vector<double> cam_calib_1_left = {1, 1, 0, 0};
     std::vector<double> cam_calib_1_right = {1, 1, 0, 0};
     std::vector<double> cam_calib_2_left = {0, 0, 0, 0};
     std::vector<double> cam_calib_2_right = {0, 0, 0, 0};
-    nh.param<std::vector<double>>("camera_parameter/intrinsics_left", cam_calib_1_left, std::vector<double>());
-    nh.param<std::vector<double>>("camera_parameter/intrinsics_right", cam_calib_1_right, std::vector<double>());
-    nh.param<std::vector<double>>("camera_parameter/distortion_coeffs_left", cam_calib_2_left, std::vector<double>());
-    nh.param<std::vector<double>>("camera_parameter/distortion_coeffs_right", cam_calib_2_right, std::vector<double>());
+    cam_calib_1_left = declareAndGetParameter<std::vector<double>>("camera_parameter.intrinsics_left", cam_calib_1_left);
+    cam_calib_1_right = declareAndGetParameter<std::vector<double>>("camera_parameter.intrinsics_right", cam_calib_1_right);
+    cam_calib_2_left = declareAndGetParameter<std::vector<double>>("camera_parameter.distortion_coeffs_left", cam_calib_2_left);
+    cam_calib_2_right = declareAndGetParameter<std::vector<double>>("camera_parameter.distortion_coeffs_right", cam_calib_2_right);
     Eigen::VectorXd cam_calib_left = Eigen::VectorXd::Zero(8);
     Eigen::VectorXd cam_calib_right = Eigen::VectorXd::Zero(8);
     cam_calib_left << cam_calib_1_left.at(0), cam_calib_1_left.at(1), cam_calib_1_left.at(2), cam_calib_1_left.at(3), 
@@ -136,12 +183,12 @@ void voxelStereoVio::readParameters()
     cam_calib_right(3) /= (odometry_options.init_options.downsample_cameras) ? 2.0 : 1.0;
 
     std::vector<int> matrix_wh_left = {1, 1};
-    nh.param<std::vector<int>>("camera_parameter/resolution_left", matrix_wh_left, std::vector<int>());
+    matrix_wh_left = declareAndGetIntVectorParameter("camera_parameter.resolution_left", matrix_wh_left);
     matrix_wh_left.at(0) /= (odometry_options.init_options.downsample_cameras) ? 2.0 : 1.0;
     matrix_wh_left.at(1) /= (odometry_options.init_options.downsample_cameras) ? 2.0 : 1.0;
 
     std::vector<int> matrix_wh_right = {1, 1};
-    nh.param<std::vector<int>>("camera_parameter/resolution_right", matrix_wh_right, std::vector<int>());
+    matrix_wh_right = declareAndGetIntVectorParameter("camera_parameter.resolution_right", matrix_wh_right);
     matrix_wh_right.at(0) /= (odometry_options.init_options.downsample_cameras) ? 2.0 : 1.0;
     matrix_wh_right.at(1) /= (odometry_options.init_options.downsample_cameras) ? 2.0 : 1.0;
 
@@ -152,11 +199,11 @@ void voxelStereoVio::readParameters()
     hG[0] = matrix_wh_left.at(1);
 
     std::vector<double> v_T_imu_cam_left;
-    nh.param<std::vector<double>>("camera_parameter/T_imu_cam_left", v_T_imu_cam_left, std::vector<double>());
+    v_T_imu_cam_left = declareAndGetParameter<std::vector<double>>("camera_parameter.T_imu_cam_left", std::vector<double>());
     Eigen::Matrix4d T_imu_cam_left = mat44FromArray(v_T_imu_cam_left);
 
     std::vector<double> v_T_imu_cam_right;
-    nh.param<std::vector<double>>("camera_parameter/T_imu_cam_right", v_T_imu_cam_right, std::vector<double>());
+    v_T_imu_cam_right = declareAndGetParameter<std::vector<double>>("camera_parameter.T_imu_cam_right", std::vector<double>());
     Eigen::Matrix4d T_imu_cam_right = mat44FromArray(v_T_imu_cam_right);
 
     Eigen::Matrix<double, 7, 1> cam_eigen_left;
@@ -205,12 +252,12 @@ void voxelStereoVio::readParameters()
     odometry_options.init_options.camera_extrinsics.insert({1, cam_eigen_right});
     odometry_options.camera_extrinsics.insert({1, cam_eigen_right});
 
-    nh.param<bool>("odometry_parameter/use_mask", para_bool, false); odometry_options.use_mask = para_bool;
+    para_bool = declareAndGetParameter<bool>("odometry_parameter.use_mask", false); odometry_options.use_mask = para_bool;
     if (odometry_options.use_mask)
     {
         std::string mask_left_path, mask_right_path;
-        nh.param<std::string>("camera_parameter/mask_left_path", str_temp, ""); mask_left_path = str_temp;
-        nh.param<std::string>("camera_parameter/mask_right_path", str_temp, ""); mask_right_path = str_temp;
+        str_temp = declareAndGetParameter<std::string>("camera_parameter.mask_left_path", ""); mask_left_path = str_temp;
+        str_temp = declareAndGetParameter<std::string>("camera_parameter.mask_right_path", ""); mask_right_path = str_temp;
 
         if (!boost::filesystem::exists(mask_left_path))
         {
@@ -242,26 +289,26 @@ void voxelStereoVio::readParameters()
         odometry_options.masks.insert({1, mask_right});
     }
 
-    nh.param<double>("imu_parameter/gyroscope_noise_density", para_double, 1.6968e-04); odometry_options.init_options.sigma_w = para_double;
-    nh.param<double>("imu_parameter/gyroscope_random_walk", para_double, 1.9393e-05); odometry_options.init_options.sigma_wb = para_double;
-    nh.param<double>("imu_parameter/accelerometer_noise_density", para_double, 2.0000e-3); odometry_options.init_options.sigma_a = para_double;
-    nh.param<double>("imu_parameter/accelerometer_random_walk", para_double, 3.0000e-03); odometry_options.init_options.sigma_ab = para_double;
-    nh.param<double>("imu_parameter/sigma_pix", para_double, 1.0); odometry_options.init_options.sigma_pix = para_double;
+    para_double = declareAndGetParameter<double>("imu_parameter.gyroscope_noise_density", 1.6968e-04); odometry_options.init_options.sigma_w = para_double;
+    para_double = declareAndGetParameter<double>("imu_parameter.gyroscope_random_walk", 1.9393e-05); odometry_options.init_options.sigma_wb = para_double;
+    para_double = declareAndGetParameter<double>("imu_parameter.accelerometer_noise_density", 2.0000e-3); odometry_options.init_options.sigma_a = para_double;
+    para_double = declareAndGetParameter<double>("imu_parameter.accelerometer_random_walk", 3.0000e-03); odometry_options.init_options.sigma_ab = para_double;
+    para_double = declareAndGetParameter<double>("imu_parameter.sigma_pix", 1.0); odometry_options.init_options.sigma_pix = para_double;
 
     std::vector<double> v_Tw;
-    nh.param<std::vector<double>>("imu_parameter/Tw", v_Tw, std::vector<double>());
+    v_Tw = declareAndGetParameter<std::vector<double>>("imu_parameter.Tw", std::vector<double>());
     Eigen::Matrix3d Tw = mat33FromArray(v_Tw);
     std::vector<double> v_Ta;
-    nh.param<std::vector<double>>("imu_parameter/Ta", v_Ta, std::vector<double>());
+    v_Ta = declareAndGetParameter<std::vector<double>>("imu_parameter.Ta", std::vector<double>());
     Eigen::Matrix3d Ta = mat33FromArray(v_Ta);
     std::vector<double> v_R_acc_imu;
-    nh.param<std::vector<double>>("imu_parameter/R_acc_imu", v_R_acc_imu, std::vector<double>());
+    v_R_acc_imu = declareAndGetParameter<std::vector<double>>("imu_parameter.R_acc_imu", std::vector<double>());
     Eigen::Matrix3d R_acc_imu = mat33FromArray(v_R_acc_imu);
     std::vector<double> v_R_gyr_imu;
-    nh.param<std::vector<double>>("imu_parameter/R_gyr_imu", v_R_gyr_imu, std::vector<double>());
+    v_R_gyr_imu = declareAndGetParameter<std::vector<double>>("imu_parameter.R_gyr_imu", std::vector<double>());
     Eigen::Matrix3d R_gyr_imu = mat33FromArray(v_R_gyr_imu);
     std::vector<double> v_Tg;
-    nh.param<std::vector<double>>("imu_parameter/Tg", v_Tg, std::vector<double>());
+    v_Tg = declareAndGetParameter<std::vector<double>>("imu_parameter.Tg", std::vector<double>());
     Eigen::Matrix3d Tg = mat33FromArray(v_Tg);
 
     Eigen::Matrix3d Dw = Tw.colPivHouseholderQr().solve(Eigen::Matrix3d::Identity());
@@ -300,7 +347,7 @@ void voxelStereoVio::readParameters()
     odometry_options.q_imu_acc = quatType::rotToQuat(R_imu_acc);
     odometry_options.q_imu_gyr = quatType::rotToQuat(R_imu_gyr);
 
-    nh.param<double>("odometry_parameter/dt_slam_delay", para_double, 2.0); odometry_options.dt_slam_delay = para_double;
+    para_double = declareAndGetParameter<double>("odometry_parameter.dt_slam_delay", 2.0); odometry_options.dt_slam_delay = para_double;
 
     odometry_options.imu_noises.sigma_w = odometry_options.init_options.sigma_w;
     odometry_options.imu_noises.sigma_wb = odometry_options.init_options.sigma_wb;
@@ -311,20 +358,20 @@ void voxelStereoVio::readParameters()
     odometry_options.imu_noises.sigma_a_2 = std::pow(odometry_options.imu_noises.sigma_a, 2);
     odometry_options.imu_noises.sigma_ab_2 = std::pow(odometry_options.imu_noises.sigma_ab, 2);
 
-    nh.param<double>("odometry_parameter/up_msckf_sigma_px", para_double, 1.0); odometry_options.msckf_options.sigma_pix = para_double;
-    nh.param<double>("odometry_parameter/up_msckf_chi2_multipler", para_double, 5.0); odometry_options.msckf_options.chi2_multipler = para_double;
-    nh.param<double>("odometry_parameter/up_slam_sigma_px", para_double, 1.0); odometry_options.slam_options.sigma_pix = para_double;
-    nh.param<double>("odometry_parameter/up_slam_chi2_multipler", para_double, 5.0); odometry_options.slam_options.chi2_multipler = para_double;
+    para_double = declareAndGetParameter<double>("odometry_parameter.up_msckf_sigma_px", 1.0); odometry_options.msckf_options.sigma_pix = para_double;
+    para_double = declareAndGetParameter<double>("odometry_parameter.up_msckf_chi2_multipler", 5.0); odometry_options.msckf_options.chi2_multipler = para_double;
+    para_double = declareAndGetParameter<double>("odometry_parameter.up_slam_sigma_px", 1.0); odometry_options.slam_options.sigma_pix = para_double;
+    para_double = declareAndGetParameter<double>("odometry_parameter.up_slam_chi2_multipler", 5.0); odometry_options.slam_options.chi2_multipler = para_double;
     odometry_options.msckf_options.sigma_pix_sq = std::pow(odometry_options.msckf_options.sigma_pix, 2);
     odometry_options.slam_options.sigma_pix_sq = std::pow(odometry_options.slam_options.sigma_pix, 2);
 
-    nh.param<bool>("odometry_parameter/downsample_cameras", para_bool, false); odometry_options.downsample_cameras = para_bool;
-    nh.param<int>("odometry_parameter/num_pts", para_int, 150); odometry_options.num_pts = para_int;
-    nh.param<int>("odometry_parameter/fast_threshold", para_int, 20); odometry_options.fast_threshold = para_int;
-    nh.param<int>("odometry_parameter/patch_size_x", para_int, 5); odometry_options.patch_size_x = para_int;
-    nh.param<int>("odometry_parameter/patch_size_y", para_int, 5); odometry_options.patch_size_y = para_int;
-    nh.param<int>("odometry_parameter/min_px_dist", para_int, 10); odometry_options.min_px_dist = para_int;
-    nh.param<std::string>("odometry_parameter/histogram_method", str_temp, "histogram");
+    para_bool = declareAndGetParameter<bool>("odometry_parameter.downsample_cameras", false); odometry_options.downsample_cameras = para_bool;
+    para_int = declareAndGetParameter<int>("odometry_parameter.num_pts", 150); odometry_options.num_pts = para_int;
+    para_int = declareAndGetParameter<int>("odometry_parameter.fast_threshold", 20); odometry_options.fast_threshold = para_int;
+    para_int = declareAndGetParameter<int>("odometry_parameter.patch_size_x", 5); odometry_options.patch_size_x = para_int;
+    para_int = declareAndGetParameter<int>("odometry_parameter.patch_size_y", 5); odometry_options.patch_size_y = para_int;
+    para_int = declareAndGetParameter<int>("odometry_parameter.min_px_dist", 10); odometry_options.min_px_dist = para_int;
+    str_temp = declareAndGetParameter<std::string>("odometry_parameter.histogram_method", "histogram");
     if (str_temp == "none") odometry_options.histogram_method = HistogramMethod::NONE;
     else if (str_temp == "histogram") odometry_options.histogram_method = HistogramMethod::HISTOGRAM;
     else if (str_temp == "clahe") odometry_options.histogram_method = HistogramMethod::CLAHE;
@@ -333,31 +380,31 @@ void voxelStereoVio::readParameters()
         std::cout << "Please select a valid histogram method: none, histogram, clahe." << std::endl;
         std::exit(EXIT_FAILURE);
     }
-    nh.param<double>("odometry_parameter/track_frequency", para_double, 20.0); odometry_options.track_frequency = para_double;
+    para_double = declareAndGetParameter<double>("odometry_parameter.track_frequency", 20.0); odometry_options.track_frequency = para_double;
 
-    nh.param<bool>("odometry_parameter/use_huber", para_bool, true); odometry_options.state_options.use_huber = para_bool;
-    nh.param<bool>("odometry_parameter/use_keyframe", para_bool, true); odometry_options.use_keyframe = para_bool;
+    para_bool = declareAndGetParameter<bool>("odometry_parameter.use_huber", true); odometry_options.state_options.use_huber = para_bool;
+    para_bool = declareAndGetParameter<bool>("odometry_parameter.use_keyframe", true); odometry_options.use_keyframe = para_bool;
 
-    nh.param<bool>("feature_parameter/refine_features", para_bool, true); odometry_options.featinit_options.refine_features = para_bool;
-    nh.param<int>("feature_parameter/max_runs", para_int, 5); odometry_options.featinit_options.max_runs = para_int;
-    nh.param<double>("feature_parameter/init_lamda", para_double, 1e-3); odometry_options.featinit_options.init_lamda = para_double;
-    nh.param<double>("feature_parameter/max_lamda", para_double, 1e10); odometry_options.featinit_options.max_lamda = para_double;
-    nh.param<double>("feature_parameter/min_dx", para_double, 1e-6); odometry_options.featinit_options.min_dx = para_double;
-    nh.param<double>("feature_parameter/min_dcost", para_double, 1e-6); odometry_options.featinit_options.min_dcost = para_double;
-    nh.param<double>("feature_parameter/lam_mult", para_double, 10.0); odometry_options.featinit_options.lam_mult = para_double;
-    nh.param<double>("feature_parameter/min_dist", para_double, 0.10); odometry_options.featinit_options.min_dist = para_double;
-    nh.param<double>("feature_parameter/max_dist", para_double, 60.0); odometry_options.featinit_options.max_dist = para_double;
-    nh.param<double>("feature_parameter/max_baseline", para_double, 40.0); odometry_options.featinit_options.max_baseline = para_double;
-    nh.param<double>("feature_parameter/max_cond_number", para_double, 10000.0); odometry_options.featinit_options.max_cond_number = para_double;
+    para_bool = declareAndGetParameter<bool>("feature_parameter.refine_features", true); odometry_options.featinit_options.refine_features = para_bool;
+    para_int = declareAndGetParameter<int>("feature_parameter.max_runs", 5); odometry_options.featinit_options.max_runs = para_int;
+    para_double = declareAndGetParameter<double>("feature_parameter.init_lamda", 1e-3); odometry_options.featinit_options.init_lamda = para_double;
+    para_double = declareAndGetParameter<double>("feature_parameter.max_lamda", 1e10); odometry_options.featinit_options.max_lamda = para_double;
+    para_double = declareAndGetParameter<double>("feature_parameter.min_dx", 1e-6); odometry_options.featinit_options.min_dx = para_double;
+    para_double = declareAndGetParameter<double>("feature_parameter.min_dcost", 1e-6); odometry_options.featinit_options.min_dcost = para_double;
+    para_double = declareAndGetParameter<double>("feature_parameter.lam_mult", 10.0); odometry_options.featinit_options.lam_mult = para_double;
+    para_double = declareAndGetParameter<double>("feature_parameter.min_dist", 0.10); odometry_options.featinit_options.min_dist = para_double;
+    para_double = declareAndGetParameter<double>("feature_parameter.max_dist", 60.0); odometry_options.featinit_options.max_dist = para_double;
+    para_double = declareAndGetParameter<double>("feature_parameter.max_baseline", 40.0); odometry_options.featinit_options.max_baseline = para_double;
+    para_double = declareAndGetParameter<double>("feature_parameter.max_cond_number", 10000.0); odometry_options.featinit_options.max_cond_number = para_double;
 
-    nh.param<int>("feature_parameter/keyframe_parallax", para_int, 10); setting_min_parallax = para_int;
+    para_int = declareAndGetParameter<int>("feature_parameter.keyframe_parallax", 10); setting_min_parallax = para_int;
     setting_min_parallax = setting_min_parallax / cam_calib_1_left.at(0);
 
-    nh.param<double>("voxel_parameter/voxel_size", para_double, 0.1); odometry_options.voxel_size = odometry_options.state_options.voxel_size = para_double;
-    nh.param<int>("voxel_parameter/max_num_points_in_voxel", para_int, 5); odometry_options.max_num_points_in_voxel = odometry_options.state_options.max_num_points_in_voxel = para_int;
-    nh.param<double>("voxel_parameter/min_distance_points", para_double, 0.03); odometry_options.min_distance_points = odometry_options.state_options.min_distance_points = para_double;
-    nh.param<int>("voxel_parameter/nb_voxels_visited", para_int, 1); odometry_options.nb_voxels_visited = para_int;
-    nh.param<bool>("voxel_parameter/use_all_points", para_bool, false); odometry_options.use_all_points = para_bool;
+    para_double = declareAndGetParameter<double>("voxel_parameter.voxel_size", 0.1); odometry_options.voxel_size = odometry_options.state_options.voxel_size = para_double;
+    para_int = declareAndGetParameter<int>("voxel_parameter.max_num_points_in_voxel", 5); odometry_options.max_num_points_in_voxel = odometry_options.state_options.max_num_points_in_voxel = para_int;
+    para_double = declareAndGetParameter<double>("voxel_parameter.min_distance_points", 0.03); odometry_options.min_distance_points = odometry_options.state_options.min_distance_points = para_double;
+    para_int = declareAndGetParameter<int>("voxel_parameter.nb_voxels_visited", 1); odometry_options.nb_voxels_visited = para_int;
+    para_bool = declareAndGetParameter<bool>("voxel_parameter.use_all_points", false); odometry_options.use_all_points = para_bool;
 }
 
 void voxelStereoVio::allocateMemory()
@@ -438,10 +485,10 @@ void voxelStereoVio::initialValue()
     time_newest_imu = -1;
 }
 
-void voxelStereoVio::imuHandler(const sensor_msgs::Imu::ConstPtr &msg)
+void voxelStereoVio::imuHandler(const sensor_msgs::msg::Imu::ConstSharedPtr msg)
 {
     imuData imu_data;
-    imu_data.timestamp = msg->header.stamp.toSec();
+    imu_data.timestamp = rclcpp::Time(msg->header.stamp).seconds();
     imu_data.gyr << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
     imu_data.acc << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
 
@@ -450,9 +497,9 @@ void voxelStereoVio::imuHandler(const sensor_msgs::Imu::ConstPtr &msg)
     time_newest_imu = imu_data.timestamp;
 }
 
-void voxelStereoVio::stereoImageHandler(const sensor_msgs::ImageConstPtr &msg_0, const sensor_msgs::ImageConstPtr &msg_1, int cam_0, int cam_1)
+void voxelStereoVio::stereoImageHandler(const sensor_msgs::msg::Image::ConstSharedPtr msg_0, const sensor_msgs::msg::Image::ConstSharedPtr msg_1, int cam_0, int cam_1)
 {
-    double timestamp = msg_0->header.stamp.toSec();
+    double timestamp = rclcpp::Time(msg_0->header.stamp).seconds();
     double time_delta = 1.0 / odometry_options.track_frequency;
 
     if (camera_last_timestamp.find(cam_0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_0) + time_delta) return;
@@ -482,7 +529,7 @@ void voxelStereoVio::stereoImageHandler(const sensor_msgs::ImageConstPtr &msg_0,
     }
 
     cameraData camera_data;
-    camera_data.timestamp = cv_ptr_0->header.stamp.toSec();
+    camera_data.timestamp = rclcpp::Time(cv_ptr_0->header.stamp).seconds();
     camera_data.camera_ids.push_back(cam_0);
     camera_data.camera_ids.push_back(cam_1);
     camera_data.images.push_back(cv_ptr_0->image.clone());
@@ -1379,27 +1426,27 @@ void voxelStereoVio::featureUpdate(cameraData &image_measurements)
 // display
 void voxelStereoVio::pubFeatImage(cv::Mat &stereo_image, double &timestamp)
 {
-    if (!stereo_image.empty() && pub_feat_image.getNumSubscribers() > 0)
+    if (!stereo_image.empty() && pub_feat_image->get_subscription_count() > 0)
     {
         try {
-            sensor_msgs::ImagePtr msg = cv_bridge::CvImage(std_msgs::Header(), "bgr8", stereo_image).toImageMsg();
-            msg->header.stamp = ros::Time().fromSec(timestamp);
+            sensor_msgs::msg::Image::SharedPtr msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", stereo_image).toImageMsg();
+            msg->header.stamp = stampFromSec(timestamp);
             msg->header.frame_id = "camera_init";
-            pub_feat_image.publish(msg);
+            pub_feat_image->publish(*msg);
         }
         catch (cv_bridge::Exception& e) {
-            ROS_ERROR("cv_bridge exception: %s", e.what());
+            RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
         }
     }
 }
 
 void voxelStereoVio::pubOdometry(std::shared_ptr<state> state_ptr, double &timestamp)
 {
-    if (pub_odom.getNumSubscribers() > 0)
+    if (pub_odom->get_subscription_count() > 0)
     {
         odom.header.frame_id = "camera_init";
         odom.child_frame_id = "body";
-        odom.header.stamp = ros::Time().fromSec(timestamp);
+        odom.header.stamp = stampFromSec(timestamp);
         odom.pose.pose.orientation.x = state_ptr->imu_ptr->getQuat()(0);
         odom.pose.pose.orientation.y = state_ptr->imu_ptr->getQuat()(1);
         odom.pose.pose.orientation.z = state_ptr->imu_ptr->getQuat()(2);
@@ -1407,11 +1454,11 @@ void voxelStereoVio::pubOdometry(std::shared_ptr<state> state_ptr, double &times
         odom.pose.pose.position.x = state_ptr->imu_ptr->getPos()(0);
         odom.pose.pose.position.y = state_ptr->imu_ptr->getPos()(1);
         odom.pose.pose.position.z = state_ptr->imu_ptr->getPos()(2);
-        pub_odom.publish(odom);
+        pub_odom->publish(odom);
     }
 }
 
-void voxelStereoVio::setPoseStamp(geometry_msgs::PoseStamped &body_pose_out, std::shared_ptr<state> state_ptr)
+void voxelStereoVio::setPoseStamp(geometry_msgs::msg::PoseStamped &body_pose_out, std::shared_ptr<state> state_ptr)
 {
     body_pose_out.pose.position.x = state_ptr->imu_ptr->getPos()(0);
     body_pose_out.pose.position.y = state_ptr->imu_ptr->getPos()(1);
@@ -1425,10 +1472,10 @@ void voxelStereoVio::setPoseStamp(geometry_msgs::PoseStamped &body_pose_out, std
 
 void voxelStereoVio::pubPath(std::shared_ptr<state> state_ptr, double &timestamp)
 {
-    if (pub_path.getNumSubscribers() > 0)
+    if (pub_path->get_subscription_count() > 0)
     {
         setPoseStamp(msg_body_pose, state_ptr);
-        msg_body_pose.header.stamp = ros::Time().fromSec(timestamp);
+        msg_body_pose.header.stamp = stampFromSec(timestamp);
         msg_body_pose.header.frame_id = "camera_init";
 
         static int i = 0;
@@ -1436,22 +1483,22 @@ void voxelStereoVio::pubPath(std::shared_ptr<state> state_ptr, double &timestamp
         if (i % 10 == 0) 
         {
             path.poses.push_back(msg_body_pose);
-            path.header.stamp = ros::Time().fromSec(timestamp);
+            path.header.stamp = stampFromSec(timestamp);
             path.header.frame_id ="camera_init";
-            pub_path.publish(path);
+            pub_path->publish(path);
         }
     }
 }
 
 void voxelStereoVio::pubHistoryPoints(pcl::PointCloud<pcl::PointXYZRGB>::Ptr points_history, double &timestamp)
 {
-    if (pub_points_history.getNumSubscribers() > 0)
+    if (pub_points_history->get_subscription_count() > 0)
     {
-        sensor_msgs::PointCloud2 point_cloud_msg;
+        sensor_msgs::msg::PointCloud2 point_cloud_msg;
         pcl::toROSMsg(*points_history, point_cloud_msg);
-        point_cloud_msg.header.stamp = ros::Time().fromSec(timestamp);
+        point_cloud_msg.header.stamp = stampFromSec(timestamp);
         point_cloud_msg.header.frame_id = "camera_init";
-        pub_points_history.publish(point_cloud_msg);
+        pub_points_history->publish(point_cloud_msg);
     }
 }
 
@@ -1459,7 +1506,7 @@ void voxelStereoVio::pubWindowPoints(std::shared_ptr<state> state_ptr, double &t
 {
     points_window->clear();
 
-    if (pub_points_window.getNumSubscribers() > 0)
+    if (pub_points_window->get_subscription_count() > 0)
     {
         auto it0 = state_ptr->map_points.begin();
         while (it0 != state_ptr->map_points.end())
@@ -1476,23 +1523,23 @@ void voxelStereoVio::pubWindowPoints(std::shared_ptr<state> state_ptr, double &t
             it0++;
         }
 
-        sensor_msgs::PointCloud2 point_cloud_msg;
+        sensor_msgs::msg::PointCloud2 point_cloud_msg;
         pcl::toROSMsg(*points_window, point_cloud_msg);
-        point_cloud_msg.header.stamp = ros::Time().fromSec(timestamp);
+        point_cloud_msg.header.stamp = stampFromSec(timestamp);
         point_cloud_msg.header.frame_id = "camera_init";
-        pub_points_window.publish(point_cloud_msg);
+        pub_points_window->publish(point_cloud_msg);
     }
 }
 
 void voxelStereoVio::pubHistoryVoxels(pcl::PointCloud<pcl::PointXYZI>::Ptr voxels_history, double &timestamp)
 {
-    if (pub_voxels_history.getNumSubscribers() > 0)
+    if (pub_voxels_history->get_subscription_count() > 0)
     {
-        sensor_msgs::PointCloud2 point_cloud_msg;
+        sensor_msgs::msg::PointCloud2 point_cloud_msg;
         pcl::toROSMsg(*voxels_history, point_cloud_msg);
-        point_cloud_msg.header.stamp = ros::Time().fromSec(timestamp);
+        point_cloud_msg.header.stamp = stampFromSec(timestamp);
         point_cloud_msg.header.frame_id = "camera_init";
-        pub_voxels_history.publish(point_cloud_msg);
+        pub_voxels_history->publish(point_cloud_msg);
     }
 
     voxels_history->clear();
@@ -1500,13 +1547,13 @@ void voxelStereoVio::pubHistoryVoxels(pcl::PointCloud<pcl::PointXYZI>::Ptr voxel
 
 void voxelStereoVio::pubVisitVoxels(pcl::PointCloud<pcl::PointXYZI>::Ptr voxels_visit, double &timestamp)
 {
-    if (pub_voxels_visit.getNumSubscribers() > 0)
+    if (pub_voxels_visit->get_subscription_count() > 0)
     {
-        sensor_msgs::PointCloud2 point_cloud_msg;
+        sensor_msgs::msg::PointCloud2 point_cloud_msg;
         pcl::toROSMsg(*voxels_visit, point_cloud_msg);
-        point_cloud_msg.header.stamp = ros::Time().fromSec(timestamp);
+        point_cloud_msg.header.stamp = stampFromSec(timestamp);
         point_cloud_msg.header.frame_id = "camera_init";
-        pub_voxels_visit.publish(point_cloud_msg);
+        pub_voxels_visit->publish(point_cloud_msg);
     }
 }
 // display
@@ -1627,20 +1674,9 @@ void voxelStereoVio::run()
 
 int main(int argc, char** argv)
 {
-    ros::init(argc, argv, "vio_node");
-    ros::Time::init();
-    
-    voxelStereoVio VIO;
-
-    ros::Rate rate(200);
-    while (ros::ok())
-    {
-        ros::spinOnce();
-
-        VIO.run();
-
-        rate.sleep();
-    }
+    rclcpp::init(argc, argv);
+    rclcpp::spin(std::make_shared<voxelStereoVio>());
+    rclcpp::shutdown();
 
     return 0;
 }

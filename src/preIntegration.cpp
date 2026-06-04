@@ -567,7 +567,11 @@ bool stateJplQuatLocal::Plus(const double *x, const double *delta, double *x_plu
 	return true;
 }
 
+#if CERES_VERSION_MAJOR > 2 || (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 2)
+bool stateJplQuatLocal::PlusJacobian(const double *x, double *jacobian) const
+#else
 bool stateJplQuatLocal::ComputeJacobian(const double *x, double *jacobian) const
+#endif
 {
 	Eigen::Map<Eigen::Matrix<double, 4, 3, Eigen::RowMajor>> j(jacobian);
 	j.topRows<3>().setIdentity();
@@ -575,6 +579,33 @@ bool stateJplQuatLocal::ComputeJacobian(const double *x, double *jacobian) const
 
 	return true;
 }
+
+#if CERES_VERSION_MAJOR > 2 || (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 2)
+bool stateJplQuatLocal::Minus(const double *y, const double *x, double *y_minus_x) const
+{
+	Eigen::Map<const Eigen::Vector4d> q_y(y);
+	Eigen::Map<const Eigen::Vector4d> q_x(x);
+	Eigen::Matrix<double, 4, 1> q_delta = quatType::quatMultiply(q_y, quatType::inv(q_x));
+	double norm_vec = q_delta.block<3, 1>(0, 0).norm();
+	Eigen::Map<Eigen::Vector3d> delta(y_minus_x);
+
+	if (norm_vec < 1e-12)
+		delta = 2.0 * q_delta.block<3, 1>(0, 0);
+	else
+		delta = q_delta.block<3, 1>(0, 0) / norm_vec * (2.0 * std::atan2(norm_vec, q_delta(3, 0)));
+
+	return true;
+}
+
+bool stateJplQuatLocal::MinusJacobian(const double *x, double *jacobian) const
+{
+	Eigen::Map<Eigen::Matrix<double, 3, 4, Eigen::RowMajor>> j(jacobian);
+	j.leftCols<3>().setIdentity();
+	j.rightCols<1>().setZero();
+
+	return true;
+}
+#endif
 
 
 

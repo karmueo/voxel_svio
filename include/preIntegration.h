@@ -98,17 +98,34 @@ public:
 		Eigen::Matrix<double, 3, 1> w_m_1 = Eigen::Matrix<double, 3, 1>::Zero(), Eigen::Matrix<double, 3, 1> a_m_1 = Eigen::Matrix<double, 3, 1>::Zero());
 };
 
-class stateJplQuatLocal : public ceres::LocalParameterization
+class stateJplQuatLocal :
+#if CERES_VERSION_MAJOR > 2 || (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 2)
+	public ceres::Manifold
+#else
+	public ceres::LocalParameterization
+#endif
 {
 public:
 
 	bool Plus(const double *x, const double *delta, double *x_plus_delta) const override;
 
+#if CERES_VERSION_MAJOR > 2 || (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 2)
+	bool PlusJacobian(const double *x, double *jacobian) const override;
+
+	bool Minus(const double *y, const double *x, double *y_minus_x) const override;
+
+	bool MinusJacobian(const double *x, double *jacobian) const override;
+
+	int AmbientSize() const override { return 4; };
+
+	int TangentSize() const override { return 3; };
+#else
 	bool ComputeJacobian(const double *x, double *jacobian) const override;
 
 	int GlobalSize() const override { return 4; };
 
 	int LocalSize() const override { return 3; };
+#endif
 };
 
 class factorGenericPrior : public ceres::CostFunction
