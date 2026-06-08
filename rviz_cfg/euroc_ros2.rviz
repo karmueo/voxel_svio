@@ -38,7 +38,7 @@ Visualization Manager:
       Color: 0; 255; 255
       Enabled: true
       Line Style: Billboards
-      Line Width: 0.08
+      Line Width: 0.03
       Name: Groundtruth Path
       Pose Style: None
       Topic: /vio/groundtruth_path
