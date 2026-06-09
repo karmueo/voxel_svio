@@ -562,7 +562,7 @@ void voxelStereoVio::processImu(imuData &imu_data)
     propagator_ptr->feedImu(imu_data, oldest_time);
 
     if (!initial_flag)
-        initializer_ptr->feedImu(imu_data, oldest_time);
+        initializer_ptr->feedImu(imu_data);
 }
 
 bool voxelStereoVio::tryToInitialize(cameraData &image_measurements)

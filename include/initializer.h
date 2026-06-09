@@ -56,7 +56,7 @@ public:
     std::shared_ptr<std::vector<imuData>> imu_data_);
 
   bool initialize(double &timestamp, Eigen::MatrixXd &covariance, std::vector<std::shared_ptr<baseType>> &order, 
-    std::shared_ptr<imuState> imu_state_, bool wait_for_jerk = true);
+    std::shared_ptr<imuState> imu_state_, bool wait_for_jerk = true, double newest_cam_time = -1);
 
 private:
 

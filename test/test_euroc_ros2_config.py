@@ -32,6 +32,21 @@ class EurocRos2ConfigTest(unittest.TestCase):
         self.assertGreaterEqual(float(self._read_scalar("up_msckf_chi2_multipler")), 5.0)
         self.assertGreaterEqual(float(self._read_scalar("up_slam_chi2_multipler")), 5.0)
 
+    def test_groundtruth_publisher_uses_system_python(self):
+        """真值发布节点应避开 conda Python，避免 `rclpy` 载入错误。"""
+        launch_path = (
+            Path(__file__).resolve().parents[1] / "launch" / "vio_euroc_ros2.launch.py"
+        )
+        launch_text = launch_path.read_text(encoding="utf-8")
+
+        self.assertRegex(
+            launch_text,
+            re.compile(
+                r'executable="publish_groundtruth_path\.py".*?prefix="/usr/bin/python3"',
+                re.DOTALL,
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,6 +105,12 @@ install(TARGETS vio_node
 )
 
 install(PROGRAMS
+  scripts/error_singlerun.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME error_singlerun
+)
+
+install(PROGRAMS
   scripts/evaluate_euroc_trajectory.py
   scripts/publish_groundtruth_path.py
   DESTINATION lib/${PROJECT_NAME}
@@ -124,10 +130,12 @@ install(FILES
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest QUIET)
   if(ament_cmake_pytest_FOUND)
+    ament_add_pytest_test(test_error_singlerun test/test_error_singlerun.py)
     ament_add_pytest_test(test_evaluate_euroc_trajectory test/test_evaluate_euroc_trajectory.py)
     ament_add_pytest_test(test_euroc_ros2_config test/test_euroc_ros2_config.py)
     ament_add_pytest_test(test_publish_groundtruth_path test/test_publish_groundtruth_path.py)
     ament_add_pytest_test(test_stereo_vio_output_policy test/test_stereo_vio_output_policy.py)
+    ament_add_pytest_test(test_static_initializer_policy test/test_static_initializer_policy.py)
   endif()
 endif()
 

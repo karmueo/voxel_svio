@@ -56,6 +56,7 @@ ros2 pkg executables voxel_svio
 
 ```text
 voxel_svio vio_node
+voxel_svio error_singlerun
 voxel_svio publish_groundtruth_path.py
 voxel_svio evaluate_euroc_trajectory.py
 ```
@@ -164,7 +165,32 @@ RViz2 固定坐标系为 `camera_init`，主要显示：
 
 ## 5. 离线误差评估
 
-完整跑完一个序列后执行：
+完整跑完一个序列后，推荐使用 OpenVINS 风格入口评估：
+
+```bash
+ros2 run voxel_svio error_singlerun \
+  posyaw \
+  /home/scl/work/slam/open_vins/ov_data/euroc_mav/V1_01_easy.txt \
+  /tmp/voxel_svio_v1_01/pose.txt
+```
+
+该命令使用 `0.02 s` 时间戳最近邻匹配，对估计轨迹执行整段
+yaw-only、known-scale 的 `posyaw` Umeyama 对齐，并输出：
+
+- `Absolute Trajectory Error`：姿态误差 `deg` 和位置误差 `m` 的 RMSE、mean、min、max、std。
+- `Relative Pose Error`：按 `8, 16, 24, 32, 40 m` 真值距离片段统计的姿态和位置中位误差。
+- `Normalized Estimation Error Squared`：若估计轨迹没有 20 列协方差信息，会输出 OpenVINS 风格警告并保持 0 统计。
+
+同一真值和估计文件也可以用 OpenVINS 原生命令并排对比：
+
+```bash
+ros2 run ov_eval error_singlerun \
+  posyaw \
+  /home/scl/work/slam/open_vins/ov_data/euroc_mav/V1_01_easy.txt \
+  /tmp/voxel_svio_v1_01/pose.txt
+```
+
+旧版位置评估脚本仍然保留，可用于生成对齐轨迹文件：
 
 ```bash
 ros2 run voxel_svio evaluate_euroc_trajectory.py \
@@ -175,11 +201,6 @@ ros2 run voxel_svio evaluate_euroc_trajectory.py \
   --max-dt 0.05 \
   --rpe-step 10
 ```
-
-输出包含：
-
-- `Absolute Trajectory Error`：位置 ATE 的 count、RMSE、mean、median、max。
-- `Relative Pose Error`：固定采样间隔的相对位置误差。
 
 ## 6. 切换序列
 

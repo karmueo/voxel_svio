@@ -89,7 +89,7 @@ bool inertialInitializer::initialize(double &timestamp, Eigen::MatrixXd &covaria
 	if (((has_jerk && wait_for_jerk) || (is_still && !wait_for_jerk)) && initializer_options.init_imu_thresh > 0.0)
 	{
 		std::cout << "[initialize]: Using static initializer method" << std::endl;
-		return static_initializer->initialize(timestamp, covariance, order, imu_state_, wait_for_jerk);
+		return static_initializer->initialize(timestamp, covariance, order, imu_state_, wait_for_jerk, newest_cam_time);
 	}
 	else if (initializer_options.init_dyn_use && !is_still)
 	{
@@ -118,11 +118,13 @@ staticInitializer::staticInitializer(inertialInitializerOptions &initializer_opt
 }
 
 bool staticInitializer::initialize(double &timestamp, Eigen::MatrixXd &covariance, std::vector<std::shared_ptr<baseType>> &order, 
-	std::shared_ptr<imuState> imu_state_, bool wait_for_jerk)
+	std::shared_ptr<imuState> imu_state_, bool wait_for_jerk, double newest_cam_time)
 {
 	if (imu_data->size() < 2) return false;
 
-	double newest_time = imu_data->at(imu_data->size() - 1).timestamp;
+	double newest_time = newest_cam_time + initializer_options.calib_camimu_dt;
+	if (newest_cam_time < 0)
+		newest_time = imu_data->at(imu_data->size() - 1).timestamp;
 	double oldest_time = imu_data->at(0).timestamp;
 
 	if (newest_time - oldest_time < initializer_options.init_window_time)

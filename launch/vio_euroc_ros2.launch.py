@@ -56,6 +56,7 @@ def launch_setup(context):
             package="voxel_svio",
             executable="publish_groundtruth_path.py",
             name="groundtruth_path_publisher",
+            prefix="/usr/bin/python3",
             output="screen",
             parameters=[
                 {
